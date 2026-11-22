@@ -1,0 +1,81 @@
+nspire-usbaudio: sound from a TI-Nspire CX / CX II through a USB audio device
+==============================================================================
+
+What it does
+------------
+usbaudio.tns registers a USB driver with the calculator OS's own USB host
+stack (through nspire-usbshim, as nspire-usbpad does), takes a USB Audio
+Class 1 device's playback interface, selects its streaming alternate
+setting, sets the sample rate and a moderate volume, opens the isochronous
+OUT pipe and streams audio: transfers of 8 one-millisecond packets are
+queued and each is re-queued from its completion callback, filled from a
+ring that the main loop keeps full. The same code is built as a library
+for gpSP (src/library.c).
+
+Programs built by make:
+- usbaudio.tns: diagnostic program. Plays a built-in tune, then
+  /documents/usbaudio/music.wav.tns if present (8/16-bit PCM, mono or
+  stereo, any rate; integer linear resampler). Esc quits, Enter or P
+  pauses, Tab selects the next item, +/- or up/down change the volume.
+  Everything goes to /documents/usbaudio/usbaudio_log.txt.tns and the
+  screen.
+- musicplayer.tns: standalone player using the same USB backend. WAV files
+  ending in .wav.tns in My Documents/music (or usbaudio) are listed
+  alphabetically (up to 64). tools/make_wav.sh converts other formats
+  on the computer.
+- USBcheck.tns: read-only inspector of the OS's USB entry points
+  (tools/usbinspect.c); it opens no USB pipes and writes no registers.
+
+Source files: src/uac.c (descriptors), src/pcm.c (packet schedule, ring,
+resampler, sample writer), src/wav.c, src/melody.c, src/player.c,
+src/ua_os.c (the OS USB backend), src/app.c (main loop, log text),
+src/main.c (calculator glue), src/library.c (the gpSP-facing API).
+tests/fake holds the simulated OS USB stack and devices.
+
+The OS's USB stack
+------------------
+The API names resemble NetBSD usbdi, but the SDK headers do not describe
+TI's actual calling convention or status enumeration. The backend uses
+these facts, checked at run time before any transfer is made:
+- setup_isoc_xfer takes eight arguments: transfer, pipe, private pointer,
+  TI buffer descriptor, frame-length array, frame count, flags, completion
+  callback.
+- setup_xfer clears the frame-length pointer, so it must not be called
+  after the isochronous setup.
+- get_xfer_status writes a byte status, not the SDK enum's word.
+- usbd_transfer returns 2 when an asynchronous transfer was queued.
+- The setup_isoc address is derived from the code of the OS and accepted
+  only when the whole leaf function matches the known implementation; an
+  unknown ABI is refused.
+- Status values: I/O error 5, no memory 7, invalid argument 10, timeout
+  12, stalled 17, aborted 19, short transfer 20. Status 11 is an
+  unsupported operation.
+tests/ti_abi_test.c executes captured OS functions as ARM instructions
+under qemu (tests/ti_abi_fixture.S).
+
+Isochronous scheduling
+----------------------
+The OS's isochronous pipes are driven by the controller's periodic frame
+list. A transfer queued with too few frames of lead is sent a frame list
+lap late, so the driver prefers a sample rate whose packets fit one
+start-split (44.1 kHz stereo on a full-speed adapter), lowers
+wMaxPacketSize in the OS's copy of the configuration descriptor to the
+largest packet of that rate, and keeps 6 transfers of 8 packets queued.
+The first transfer carries silence. The music player writes its log lines
+in one file write every 5 s.
+
+Reading the log
+---------------
+  "OS call missing: syscall N"   the OS lacks a required USB call
+Periodic lines report completed packet counts and the frame-list state.
+While no device is offered, a status line and controller snapshot appear
+every five seconds; there is no connection timeout and Esc still quits.
+
+Build and test
+--------------
+With the Ndless toolchain on PATH:
+  make          builds the programs under build/
+  make test     builds and runs the host tests (with AddressSanitizer),
+                the qemu ARM tests and the artefact check
+  make check    checks the built programs only
+The host tests use the simulated OS in tests/fake.
